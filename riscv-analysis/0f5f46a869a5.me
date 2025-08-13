@@ -1,0 +1,83 @@
+## Commit 0f5f46a869a5 详细分析
+### 基本信息
+- Commit ID : 0f5f46a869a5e82fde7a208fbde6f3846972c72a
+- 作者 : Song Shuai songshuaishuai@tinylab.org
+- 日期 : 2023年9月7日
+- 标题 : riscv: kexec: Remove -fPIE for PURGATORY_CFLAGS
+### 问题背景
+这个patch解决了RISC-V架构中kexec功能的一个重要问题。当启用 CONFIG_RELOCATABLE 配置时，内核的 KBUILD_CFLAGS 会自动添加 -fPIE （Position Independent Executable）编译选项，这导致purgatory代码在编译时产生了不兼容的重定位类型。
+
+### 技术原理
+1. Purgatory的作用
+Purgatory是kexec机制中的关键组件，它是一个小型的中间代码，运行在两个内核之间：
+
+- 负责验证新内核镜像的完整性（通过SHA256校验）
+- 在旧内核关闭后、新内核启动前执行
+- 确保内核切换过程的安全性
+
+2. 重定位类型问题
+当使用 -fPIE 编译时：
+
+- 问题重定位 : purgatory/string.o 中的 _ctype 符号引用产生了 R_RISCV_GOT_HI20 重定位类型（编号20）
+- 期望重定位 : 应该产生 R_RISCV_PCREL_HI20 重定位类型
+
+3. 重定位处理限制
+查看 `elf_kexec.c` 中的 `arch_kexec_apply_relocations_add` 函数，可以看到purgatory的重定位处理器只支持有限的重定位类型：
+
+- R_RISCV_BRANCH
+- R_RISCV_JAL
+- R_RISCV_PCREL_HI20
+- R_RISCV_CALL_PLT
+- R_RISCV_CALL
+- R_RISCV_RVC_BRANCH
+- R_RISCV_RVC_JUMP
+- R_RISCV_ADD16/SUB16/ADD32/SUB32
+- R_RISCV_PCREL_LO12_I
+关键问题 : 不支持 R_RISCV_GOT_HI20 （编号20），这导致kexec_load_file()失败。
+
+### 错误现象
+```
+[  880.386562] kexec_image: The entry point of kernel at 
+0x80200000
+[  880.388650] kexec_image: Unknown rela relocation: 20
+[  880.389173] kexec_image: Error loading purgatory 
+ret=-8
+```
+### 解决方案
+在 `Makefile` 中添加：
+
+```
+ifdef CONFIG_RELOCATABLE
+PURGATORY_CFLAGS_REMOVE += -fPIE
+endif
+```
+这个修改确保：
+
+1. 1.
+   当启用 CONFIG_RELOCATABLE 时，purgatory代码编译时移除 -fPIE 选项
+2. 2.
+   生成 R_RISCV_PCREL_HI20 重定位类型而不是 R_RISCV_GOT_HI20
+3. 3.
+   purgatory重定位处理器能够正确处理这些重定位
+### 技术细节 CONFIG_RELOCATABLE的影响
+在 `Makefile` 中：
+
+```
+ifeq ($(CONFIG_RELOCATABLE),y)
+    LDFLAGS_vmlinux += -shared -Bsymbolic -z notext
+    KBUILD_CFLAGS += -fPIE
+endif
+``` 重定位类型区别
+- R_RISCV_GOT_HI20 : 需要GOT（Global Offset Table）支持，用于位置无关代码
+- R_RISCV_PCREL_HI20 : PC相对寻址，不需要GOT，更适合purgatory的简单环境
+### 修复的commit引用
+- Fixes : 39b33072941f ("riscv: Introduce CONFIG_RELOCATABLE")
+- 这表明问题是在引入CONFIG_RELOCATABLE功能时产生的
+### 影响和意义
+1. 1.
+   功能恢复 : 修复了启用CONFIG_RELOCATABLE时kexec功能完全失效的问题
+2. 2.
+   兼容性 : 保持了purgatory代码的简洁性，避免了复杂的GOT重定位处理
+3. 3.
+   安全性 : 确保了内核热重启功能的可靠性
+这个patch是一个精准的修复，通过最小的改动解决了编译器选项冲突导致的重定位兼容性问题，体现了对RISC-V架构特性和kexec机制的深入理解。

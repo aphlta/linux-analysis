@@ -1,0 +1,68 @@
+## commit 767423658d53 详细分析
+### 基本信息
+- Commit ID : 767423658d53d147409821e51e6d0bc12425b24f
+- 作者 : Song Shuai songshuaishuai@tinylab.org
+- 提交时间 : 2023年9月7日
+- 标题 : riscv: kexec: Align the kexeced kernel entry
+### 问题背景
+这个patch修复了RISC-V架构中kexec功能的一个关键bug。问题的根源在于 内存对齐要求不匹配 ：
+ RISC-V启动协议的对齐要求
+- RV64 (64位) : 需要2MB对齐 (PMD_SIZE = 2^21 = 2MB)
+- RV32 (32位) : 需要4MB对齐 (PGDIR_SIZE = 2^22 = 4MB)
+这些对齐要求来自于RISC-V的页表结构：
+
+- RV64使用PMD_SHIFT = 21，对应2MB的大页
+- RV32使用PGDIR_SHIFT = 22，对应4MB的大页
+### 修复的具体问题 修复前的代码
+```
+kbuf.buf_align = PAGE_SIZE;  // 只有4KB对齐
+``` 修复后的代码
+```
+/*
+ * Current riscv boot protocol requires 2MB alignment for
+ * RV64 and 4MB alignment for RV32
+ */
+kbuf.buf_align = PMD_SIZE;  // 2MB (RV64) 或 4MB (RV32) 
+对齐
+```
+### 问题的严重性
+当kexec加载的内核没有正确对齐时，会在 setup_vm() 函数中 静默失败 ，这是一个非常危险的问题：
+
+1. 1.
+   静默失败 : 系统不会给出明确的错误信息
+2. 2.
+   启动失败 : kexec的内核无法正常启动
+3. 3.
+   调试困难 : 由于是静默失败，很难定位问题原因
+### 技术细节 setup_vm()函数的要求
+setup_vm() 是RISC-V内核启动时的关键函数，负责设置虚拟内存映射。它要求内核入口地址必须按照PMD边界对齐，原因是：
+
+1. 1.
+   页表映射效率 : 大页映射可以减少TLB miss
+2. 2.
+   内存管理简化 : 对齐的地址便于页表管理
+3. 3.
+   硬件要求 : RISC-V MMU的设计要求 KASLR的影响
+在 setup_vm() 中可以看到KASLR (Kernel Address Space Layout Randomization) 也必须遵循PMD对齐：
+
+```
+/*
+ * we must be aligned on PMD_SIZE.
+ */
+nr_pos = (PUD_SIZE - kernel_size) / PMD_SIZE;
+kernel_map.virt_offset = (kaslr_seed % nr_pos) * 
+PMD_SIZE;
+```
+### 修复的影响范围
+这个patch修复了commit 8acea455fafa ("RISC-V: Support for kexec_file on panic") 引入的问题，该commit添加了kexec_file功能但没有考虑到对齐要求。
+
+### 前因后果总结
+1. 1.
+   前因 : kexec_file功能引入时，只使用了PAGE_SIZE (4KB) 对齐
+2. 2.
+   问题 : 违反了RISC-V启动协议的对齐要求
+3. 3.
+   后果 : kexec的内核在setup_vm()阶段静默失败
+4. 4.
+   修复 : 使用PMD_SIZE对齐，确保符合启动协议要求
+这个patch虽然修改很小，但解决了一个可能导致系统无法正常kexec重启的严重问题，对于依赖kexec功能的生产环境来说非常重要。
